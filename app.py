@@ -21,6 +21,30 @@ client = genai.Client()
 
 
 # ============================================================
+# STREAMING CALLBACK
+# ============================================================
+
+# Used by the Streamlit UI to receive agent/tool events as they happen.
+event_callback = None
+
+
+def set_event_callback(callback):
+    """Set a callback that receives live agent/tool events."""
+    global event_callback
+    event_callback = callback
+
+
+def emit_event(event):
+    """Send an event to the active UI, if one is connected."""
+    if event_callback is not None:
+        try:
+            event_callback(event)
+        except Exception:
+            # UI streaming must never break the agent itself.
+            pass
+
+
+# ============================================================
 # FILE SYSTEM TOOLS
 # ============================================================
 
@@ -228,6 +252,12 @@ def run_command(command: list[str], cwd: str = None):
         if cwd:
             print(f"   Directory: {cwd}")
 
+        emit_event({
+            "step": "command_start",
+            "command": command,
+            "cwd": cwd
+        })
+
         process = subprocess.Popen(
             command,
             cwd=cwd,
@@ -247,6 +277,10 @@ def run_command(command: list[str], cwd: str = None):
                 line = line.rstrip("\r\n")
                 print(f"   {line}")
                 output_lines.append(line)
+                emit_event({
+                    "step": "command_output",
+                    "line": line
+                })
 
         return_code = process.wait()
         output = "\n".join(output_lines)
@@ -300,6 +334,12 @@ def install_dependencies(project_path: str):
         print(f"\n📦 Installing dependencies in: {project_path}")
         print(f"⚙️ Executing: {' '.join(command)}\n")
 
+        emit_event({
+            "step": "command_start",
+            "command": command,
+            "cwd": project_path
+        })
+
         # subprocess.Popen: Spawns a new background process on your computer. Unlike subprocess.run(), Popen does not wait for the command to finish; it streams data while the command runs.
         
         process = subprocess.Popen(
@@ -321,6 +361,10 @@ def install_dependencies(project_path: str):
                 line = line.rstrip("\r\n")
                 print(f"   {line}")
                 output_lines.append(line)
+                emit_event({
+                    "step": "command_output",
+                    "line": line
+                })
 
         return_code = process.wait()
         output = "\n".join(output_lines)
@@ -364,6 +408,12 @@ def install_package(project_path: str, package: str = None):
         print(f"\n📦 Installing package in: {project_path}")
         print(f"⚙️ Executing: {' '.join(command)}\n")
 
+        emit_event({
+            "step": "command_start",
+            "command": command,
+            "cwd": project_path
+        })
+
         process = subprocess.Popen(
             command,
             cwd=project_path,
@@ -383,6 +433,10 @@ def install_package(project_path: str, package: str = None):
                 line = line.rstrip("\r\n")
                 print(f"   {line}")
                 output_lines.append(line)
+                emit_event({
+                    "step": "command_output",
+                    "line": line
+                })
 
         return_code = process.wait()
         output = "\n".join(output_lines)
@@ -401,6 +455,138 @@ def install_package(project_path: str, package: str = None):
 
 
 # ============================================================
+# REACT SERVER TOOLS
+# ============================================================
+
+def start_react_app(project_path: str, port: int = 5173):
+    """Start a Vite React development server in the background."""
+
+    try:
+        if not os.path.isdir(project_path):
+            return {
+                "success": False,
+                "error": f"Project directory not found: {project_path}"
+            }
+
+        command = [
+            "npm",
+            "run",
+            "dev",
+            "--",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(port),
+            "--strictPort"
+        ]
+
+        if os.name == "nt":
+            command[0] = "npm.cmd"
+
+        log_path = os.path.join(project_path, ".react-agent-dev.log")
+        log_file = open(log_path, "a", encoding="utf-8")
+
+        if os.name == "nt":
+            process = subprocess.Popen(
+                command,
+                cwd=project_path,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                shell=False,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+        else:
+            process = subprocess.Popen(
+                command,
+                cwd=project_path,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                shell=False,
+                start_new_session=True
+            )
+
+        log_file.close()
+
+        emit_event({
+            "step": "server_starting",
+            "project_path": project_path,
+            "pid": process.pid,
+            "port": port
+        })
+
+        return {
+            "success": True,
+            "pid": process.pid,
+            "project_path": project_path,
+            "port": port,
+            "url": f"http://localhost:{port}",
+            "message": "React development server started successfully.",
+            "log_file": log_path
+        }
+
+    except Exception as error:
+        return {
+            "success": False,
+            "error": str(error)
+        }
+
+
+def stop_react_app(pid: int):
+    """Terminate a React development server by PID."""
+
+    try:
+        pid = int(pid)
+
+        if os.name == "nt":
+            result = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace"
+            )
+
+            success = result.returncode == 0
+            output = result.stdout.strip()
+
+        else:
+            os.killpg(pid, 15)
+            success = True
+            output = f"Process group {pid} terminated."
+
+        emit_event({
+            "step": "server_stopped",
+            "pid": pid,
+            "success": success
+        })
+
+        return {
+            "success": success,
+            "pid": pid,
+            "message": "React development server terminated." if success else "Failed to terminate React development server.",
+            "output": output
+        }
+
+    except ProcessLookupError:
+        return {
+            "success": True,
+            "pid": pid,
+            "message": "React development server was already stopped."
+        }
+    except Exception as error:
+        return {
+            "success": False,
+            "pid": pid,
+            "error": str(error)
+        }
+
+
+# ============================================================
 # AVAILABLE TOOLS
 # ============================================================
 
@@ -411,7 +597,9 @@ available_tools = {
     "read_file": read_file,
     "list_directory": list_directory,
     "install_dependencies": install_dependencies,
-    "install_package": install_package
+    "install_package": install_package,
+    "start_react_app": start_react_app,
+    "stop_react_app": stop_react_app
 }
 
 
@@ -445,7 +633,14 @@ STEP 4: write_file
   - Write all application source files
   - Use 'file_path' and 'content' parameters
 
-STEP 5: Output success
+STEP 5: start_react_app
+  - Start the React development server after ALL application files are written
+  - Use the project_path from the project
+  - Use port 5173 unless another port is required
+  - The server must listen on 0.0.0.0
+
+STEP 6: Output success
+  - Return the running application URL
 
 ==================================================
 EXAMPLE WORKFLOW - WEATHER APP
@@ -502,6 +697,14 @@ Action 4:
     "input": {"file_path": "weather-app/src/App.jsx", "content": "// React code here"}
 }
 
+Action 5:
+{
+    "step": "action",
+    "content": "Starting React development server",
+    "function": "start_react_app",
+    "input": {"project_path": "/path/to/weather-app", "port": 5173}
+}
+
 ==================================================
 TOOL PARAMETERS (MUST USE EXACT NAMES)
 ==================================================
@@ -528,6 +731,12 @@ TOOL PARAMETERS (MUST USE EXACT NAMES)
 
 7. install_package:
    {"project_path": "/path/to/project", "package": "axios"}
+
+8. start_react_app:
+   {"project_path": "/path/to/project", "port": 5173}
+
+9. stop_react_app:
+   {"pid": 12345}
 
 ==================================================
 APPLICATION TYPES
@@ -587,15 +796,17 @@ IMPORTANT RULES
 
 1. ALWAYS call run_command after create_react_project
 2. ALWAYS call install_dependencies after run_command succeeds
-3. Use EXACT parameter names (file_path, project_path, etc.)
-4. Write COMPLETE, WORKING code in each file
-5. NEVER create placeholder code or TODO comments
-6. Use React hooks properly (useState, useEffect, etc.)
-7. Include error handling in all components
-8. Make responsive designs with CSS
-9. Ask for missing information (theme, bundler) before creating
-10. Return ONLY valid JSON - no markdown, no backticks, no extra text
-11. *** RETURN EXACTLY ONE JSON OBJECT PER RESPONSE ***
+3. ALWAYS call start_react_app after all application files have been written
+4. The final output must include the running application URL
+5. Use EXACT parameter names (file_path, project_path, etc.)
+6. Write COMPLETE, WORKING code in each file
+7. NEVER create placeholder code or TODO comments
+8. Use React hooks properly (useState, useEffect, etc.)
+9. Include error handling in all components
+10. Make responsive designs with CSS
+11. Ask for missing information (theme, bundler) before creating
+12. Return ONLY valid JSON - no markdown, no backticks, no extra text
+13. *** RETURN EXACTLY ONE JSON OBJECT PER RESPONSE ***
     - Do NOT return a "plan" and an "action" together.
     - Do NOT chain multiple steps in one reply.
     - Pick ONE step (question OR plan OR action OR output) and return only that.
@@ -713,19 +924,23 @@ def clean_json_response(raw_response):
 # AGENT STATE
 # ============================================================
 
-messages = [
-    {
-        "role": "system",
-        "content": SYSTEM_PROMPT
-    }
-]
+def create_messages():
+    """
+    Create a fresh conversation state for an agent session.
+    """
+    return [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT
+        }
+    ]
 
 
 # ============================================================
 # HELPER
 # ============================================================
 
-def add_message(role, content):
+def add_message(messages, role, content):
     messages.append(
         {
             "role": role,
@@ -735,170 +950,402 @@ def add_message(role, content):
 
 
 # ============================================================
-# AGENT LOOP
+# AGENT TURN
 # ============================================================
 
-print("\n" + "="*50)
-print("🤖 React Agent - V3 (Gemini 3.1 Flash Lite)")
-print("Complete React Application Creator")
-print("="*50)
-print("\nType 'exit' to quit.\n")
+def run_agent_turn(user_input, messages):
+    """
+    Process one user message through the React agent.
 
-# Get initial user input
-user_input = input("You: ")
+    The agent can perform multiple internal steps:
+        user
+          ↓
+        Gemini
+          ↓
+        plan / question / action / output
+          ↓
+        tool execution
+          ↓
+        observation
+          ↓
+        Gemini
+          ↓
+        ...
 
-if user_input.lower().strip() in ["exit", "quit"]:
-    print("\n🤖: Goodbye!")
-    sys.exit(0)
+    Returns:
+        {
+            "status": "question" | "output" | "error",
+            "content": str,
+            "project": dict,
+            "files": list,
+            "events": list
+        }
+    """
 
-add_message("user", user_input)
+    add_message(messages, "user", user_input)
 
-while True:
-    # ========================================================
-    # GEMINI REQUEST
-    # ========================================================
+    events = []
 
-    try:
-        # Call Gemini
-        raw_response = call_gemini(messages, SYSTEM_PROMPT)
-        
-        if raw_response is None:
-            print("\n❌ Failed to get response from Gemini")
-            break
-        
-        # Clean the response
-        cleaned_response = clean_json_response(raw_response)
-        
-        if cleaned_response is None:
-            print("\n❌ No valid JSON found in response")
-            print(f"Raw response: {raw_response}")
-            break
+    while True:
 
-    except Exception as error:
-        print(f"\n❌ Gemini API Error:\n{error}")
-        break
+        # ====================================================
+        # GEMINI REQUEST
+        # ====================================================
 
-    # ========================================================
-    # PARSE RESPONSE
-    # ========================================================
+        try:
+            raw_response = call_gemini(messages, SYSTEM_PROMPT)
 
-    try:
-        parsed_response = json.loads(cleaned_response)
-    except json.JSONDecodeError:
-        print("\n❌ Invalid JSON returned by model:")
-        print(cleaned_response)
-        break
+            if raw_response is None:
+                return {
+                    "status": "error",
+                    "content": "Failed to get a response from Gemini.",
+                    "project": {},
+                    "files": [],
+                    "events": events
+                }
 
-    # ========================================================
-    # STORE ASSISTANT RESPONSE
-    # ========================================================
+            cleaned_response = clean_json_response(raw_response)
 
-    add_message("assistant", cleaned_response)
+            if cleaned_response is None:
+                return {
+                    "status": "error",
+                    "content": "Gemini did not return valid JSON.",
+                    "project": {},
+                    "files": [],
+                    "events": events
+                }
 
-    # ========================================================
-    # READ AGENT RESPONSE
-    # ========================================================
+        except Exception as error:
+            return {
+                "status": "error",
+                "content": f"Gemini API error: {error}",
+                "project": {},
+                "files": [],
+                "events": events
+            }
 
-    step = parsed_response.get("step")
-    content = parsed_response.get("content", "")
-    function_name = parsed_response.get("function")
-    tool_input = parsed_response.get("input", {})
-    project = parsed_response.get("project", {})
-    files = parsed_response.get("files", [])
+        # ====================================================
+        # PARSE RESPONSE
+        # ====================================================
 
-    # ========================================================
-    # QUESTION
-    # ========================================================
+        try:
+            parsed_response = json.loads(cleaned_response)
 
-    if step == "question":
-        print(f"\n🤖: {content}")
-        user_input = input("\nYou: ")
+        except json.JSONDecodeError:
+            return {
+                "status": "error",
+                "content": "Invalid JSON returned by Gemini.",
+                "project": {},
+                "files": [],
+                "events": events
+            }
+
+        # ====================================================
+        # STORE ASSISTANT RESPONSE
+        # ====================================================
+
+        add_message(messages, "assistant", cleaned_response)
+
+        # ====================================================
+        # READ AGENT RESPONSE
+        # ====================================================
+
+        step = parsed_response.get("step")
+        content = parsed_response.get("content", "")
+        function_name = parsed_response.get("function")
+        tool_input = parsed_response.get("input", {})
+        project = parsed_response.get("project", {})
+        files = parsed_response.get("files", [])
+
+        # Store event for Streamlit UI
+        events.append(
+            {
+                "step": step,
+                "content": content,
+                "function": function_name,
+                "input": tool_input,
+                "project": project,
+                "files": files
+            }
+        )
+
+        emit_event({
+            "step": step,
+            "content": content,
+            "function": function_name,
+            "input": tool_input,
+            "project": project,
+            "files": files
+        })
+
+        # ====================================================
+        # QUESTION
+        # ====================================================
+
+        if step == "question":
+
+            return {
+                "status": "question",
+                "content": content,
+                "project": project,
+                "files": files,
+                "events": events
+            }
+
+        # ====================================================
+        # PLAN
+        # ====================================================
+
+        if step == "plan":
+
+            # No user interaction is required.
+            # Continue the agent loop so Gemini can perform
+            # the next action.
+
+            continue
+
+        # ====================================================
+        # ACTION
+        # ====================================================
+
+        if step == "action":
+
+            # Validate tool
+            if function_name not in available_tools:
+
+                observation = {
+                    "success": False,
+                    "error": f"Unknown tool: {function_name}"
+                }
+
+            else:
+
+                tool = available_tools[function_name]
+
+                try:
+                    observation = tool(**tool_input)
+
+                except TypeError as error:
+
+                    observation = {
+                        "success": False,
+                        "error": f"Invalid tool input: {str(error)}"
+                    }
+
+                except Exception as error:
+
+                    observation = {
+                        "success": False,
+                        "error": str(error)
+                    }
+
+            # Store tool observation in events
+            events.append(
+                {
+                    "step": "observation",
+                    "content": "",
+                    "function": function_name,
+                    "input": tool_input,
+                    "observation": observation
+                }
+            )
+
+            emit_event({
+                "step": "observation",
+                "content": "",
+                "function": function_name,
+                "input": tool_input,
+                "observation": observation
+            })
+
+            # =================================================
+            # SEND OBSERVATION BACK TO GEMINI
+            # =================================================
+
+            observation_message = {
+                "step": "observe",
+                "output": observation,
+                "project": project,
+                "files": files
+            }
+
+            add_message(
+                messages,
+                "user",
+                json.dumps(
+                    observation_message,
+                    ensure_ascii=False
+                )
+            )
+
+            # Continue the agent loop
+            continue
+
+        # ====================================================
+        # FINAL OUTPUT
+        # ====================================================
+
+        if step == "output":
+
+            return {
+                "status": "output",
+                "content": content,
+                "project": project,
+                "files": files,
+                "events": events
+            }
+
+        # ====================================================
+        # UNKNOWN STEP
+        # ====================================================
+
+        return {
+            "status": "error",
+            "content": f"Unknown agent step: {step}",
+            "project": project,
+            "files": files,
+            "events": events
+        }
+
+
+# ============================================================
+# CLI AGENT
+# ============================================================
+
+def run_cli():
+
+    print("\n" + "=" * 50)
+    print("🤖 React Agent - V3 (Gemini 3.1 Flash Lite)")
+    print("Complete React Application Creator")
+    print("=" * 50)
+
+    print("\nType 'exit' to quit.\n")
+
+    messages = create_messages()
+
+    while True:
+
+        user_input = input("You: ")
 
         if user_input.lower().strip() in ["exit", "quit"]:
             print("\n🤖: Goodbye!")
             break
 
-        add_message("user", user_input)
-        continue
+        result = run_agent_turn(
+            user_input,
+            messages
+        )
 
-    # ========================================================
-    # PLAN
-    # ========================================================
+        # ====================================================
+        # DISPLAY EVENTS
+        # ====================================================
 
-    if step == "plan":
-        print(f"\n🧠: {content}")
-        if files:
-            print("\n📁 Files to create:")
-            for file in files:
-                print(f"   - {file}")
-        continue
+        for event in result.get("events", []):
 
-    # ========================================================
-    # ACTION
-    # ========================================================
+            step = event.get("step")
 
-    if step == "action":
-        print(f"\n🛠️: Calling {function_name}")
-        print(f"   Input: {json.dumps(tool_input, indent=2)}")
+            if step == "plan":
 
-        # Validate tool
-        if function_name not in available_tools:
-            observation = {
-                "success": False,
-                "error": f"Unknown tool: {function_name}"
-            }
-        else:
-            tool = available_tools[function_name]
-            try:
-                observation = tool(**tool_input)
-            except TypeError as error:
-                observation = {
-                    "success": False,
-                    "error": f"Invalid tool input: {str(error)}"
-                }
-            except Exception as error:
-                observation = {
-                    "success": False,
-                    "error": str(error)
-                }
+                print(f"\n🧠: {event.get('content', '')}")
 
-        # Display observation
-        print("\n🔍 Observation:")
-        print(json.dumps(observation, indent=2, ensure_ascii=False))
+                files = event.get("files", [])
 
-        # Send observation back to model
-        observation_message = {
-            "step": "observe",
-            "output": observation,
-            "project": project,
-            "files": files
-        }
+                if files:
+                    print("\n📁 Files to create:")
 
-        add_message("user", json.dumps(observation_message, ensure_ascii=False))
-        continue
+                    for file in files:
+                        print(f"   - {file}")
 
-    # ========================================================
-    # FINAL OUTPUT
-    # ========================================================
+            elif step == "action":
 
-    if step == "output":
-        print(f"\n✅ {content}")
-        
-        if project:
-            print("\n📦 Project Details:")
-            print(json.dumps(project, indent=2, ensure_ascii=False))
-        
-        if files:
-            print(f"\n📁 Created Files ({len(files)}):")
-            for file in files:
-                print(f"   - {file}")
-        
-        break
+                function_name = event.get("function")
+                tool_input = event.get("input", {})
 
-    # ========================================================
-    # UNKNOWN STEP
-    # ========================================================
+                print(f"\n🛠️: Calling {function_name}")
 
-    print(f"\n❌ Unknown agent step: {step}")
-    print(json.dumps(parsed_response, indent=2, ensure_ascii=False))
-    break
+                print(
+                    "   Input: "
+                    + json.dumps(
+                        tool_input,
+                        indent=2,
+                        ensure_ascii=False
+                    )
+                )
+
+            elif step == "observation":
+
+                observation = event.get("observation", {})
+
+                print("\n🔍 Observation:")
+
+                print(
+                    json.dumps(
+                        observation,
+                        indent=2,
+                        ensure_ascii=False
+                    )
+                )
+
+        # ====================================================
+        # QUESTION
+        # ====================================================
+
+        if result["status"] == "question":
+
+            print(f"\n🤖: {result['content']}")
+
+            continue
+
+        # ====================================================
+        # OUTPUT
+        # ====================================================
+
+        if result["status"] == "output":
+
+            print(f"\n✅ {result['content']}")
+
+            project = result.get("project", {})
+            files = result.get("files", [])
+
+            if project:
+
+                print("\n📦 Project Details:")
+
+                print(
+                    json.dumps(
+                        project,
+                        indent=2,
+                        ensure_ascii=False
+                    )
+                )
+
+            if files:
+
+                print(
+                    f"\n📁 Created Files ({len(files)}):"
+                )
+
+                for file in files:
+                    print(f"   - {file}")
+
+            continue
+
+        # ====================================================
+        # ERROR
+        # ====================================================
+
+        if result["status"] == "error":
+
+            print(
+                f"\n❌ {result['content']}"
+            )
+
+            continue
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+    run_cli()

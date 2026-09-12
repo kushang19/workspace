@@ -12,4 +12,8 @@ services:
 
     working_dir: /workspace
 
-    command: sleep infinity
+    ports:
+      - "8501:8501"
+      - "5173:5173"
+
+    command: sleep infinity 
