@@ -1,0 +1,15 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+
+    volumes:
+      - ..:/workspace:cached
+
+    env_file:
+      - ../.env
+
+    working_dir: /workspace
+
+    command: sleep infinity
