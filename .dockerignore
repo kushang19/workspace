@@ -5,3 +5,7 @@
 venv
 __pycache__
 *.pyc
+node_modules
+dist
+.vite
+.react-agent-dev.log

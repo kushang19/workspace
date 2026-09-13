@@ -1,5 +1,6 @@
 FROM python:3.12-slim
 
+# Install Git, Node.js 22 and npm
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl gnupg git \
     && mkdir -p /etc/apt/keyrings \
@@ -14,6 +15,17 @@ RUN apt-get update \
 
 WORKDIR /workspace
 
+# Install Python dependencies
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application files
+COPY app.py .
+COPY streamlit_app.py .
+
+# Render will use this port
+EXPOSE 10000
+
+# Production/default startup
+CMD ["streamlit", "run", "streamlit_app.py", "--server.address=0.0.0.0", "--server.port=10000"]
