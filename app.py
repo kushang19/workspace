@@ -6,6 +6,11 @@ import json
 import subprocess
 import os
 import sys
+import socket
+import time
+import signal
+import urllib.request
+
 import re
 from pathlib import Path
 
@@ -458,8 +463,58 @@ def install_package(project_path: str, package: str = None):
 # REACT SERVER TOOLS
 # ============================================================
 
+def find_available_port(start_port: int = 5173, max_attempts: int = 100):
+    """
+    Find an available TCP port.
+
+    The first project normally gets 5173. If that port is already
+    occupied, the next available port is used (5174, 5175, ...).
+    """
+    for port in range(start_port, start_port + max_attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+            try:
+                sock.bind(("0.0.0.0", port))
+                return port
+            except OSError:
+                continue
+
+    return None
+
+
+def wait_for_server(port: int, timeout: int = 15):
+    """
+    Wait until something is responding on localhost:port.
+    Returns True when the HTTP server is reachable.
+    """
+
+    deadline = time.time() + timeout
+    url = f"http://127.0.0.1:{port}"
+
+    while time.time() < deadline:
+
+        try:
+            with urllib.request.urlopen(url, timeout=0.5) as response:
+                return response.status < 500
+
+        except urllib.error.HTTPError as error:
+            # An HTTP error still proves that the server is alive.
+            return error.code < 500
+
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
+            time.sleep(0.25)
+
+    return False
+
+
 def start_react_app(project_path: str, port: int = 5173):
-    """Start a Vite React development server in the background."""
+    """
+    Start a Vite React development server in the background.
+
+    If the requested port is occupied, automatically select the
+    next available port so multiple projects can run simultaneously.
+    """
 
     try:
         if not os.path.isdir(project_path):
@@ -467,6 +522,29 @@ def start_react_app(project_path: str, port: int = 5173):
                 "success": False,
                 "error": f"Project directory not found: {project_path}"
             }
+
+        requested_port = int(port)
+
+        actual_port = find_available_port(
+            start_port=requested_port
+        )
+
+        if actual_port is None:
+            return {
+                "success": False,
+                "error": (
+                    f"No available port found starting from "
+                    f"{requested_port}."
+                )
+            }
+
+        if actual_port != requested_port:
+            emit_event({
+                "step": "server_port_changed",
+                "requested_port": requested_port,
+                "port": actual_port,
+                "reason": f"Port {requested_port} is already in use."
+            })
 
         command = [
             "npm",
@@ -476,15 +554,23 @@ def start_react_app(project_path: str, port: int = 5173):
             "--host",
             "0.0.0.0",
             "--port",
-            str(port),
+            str(actual_port),
             "--strictPort"
         ]
 
         if os.name == "nt":
             command[0] = "npm.cmd"
 
-        log_path = os.path.join(project_path, ".react-agent-dev.log")
-        log_file = open(log_path, "a", encoding="utf-8")
+        log_path = os.path.join(
+            project_path,
+            ".react-agent-dev.log"
+        )
+
+        log_file = open(
+            log_path,
+            "a",
+            encoding="utf-8"
+        )
 
         if os.name == "nt":
             process = subprocess.Popen(
@@ -515,16 +601,53 @@ def start_react_app(project_path: str, port: int = 5173):
             "step": "server_starting",
             "project_path": project_path,
             "pid": process.pid,
-            "port": port
+            "port": actual_port
+        })
+
+        # Do not report success until Vite is actually reachable.
+        if not wait_for_server(actual_port):
+            if process.poll() is not None:
+                return {
+                    "success": False,
+                    "error": (
+                        "React server exited before becoming ready. "
+                        f"Check {log_path} for details."
+                    ),
+                    "pid": process.pid,
+                    "project_path": project_path,
+                    "port": actual_port,
+                    "log_file": log_path
+                }
+
+            return {
+                "success": False,
+                "error": (
+                    f"React server did not become ready on port "
+                    f"{actual_port} within 15 seconds."
+                ),
+                "pid": process.pid,
+                "project_path": project_path,
+                "port": actual_port,
+                "log_file": log_path
+            }
+
+        url = f"http://localhost:{actual_port}"
+
+        emit_event({
+            "step": "server_ready",
+            "project_path": project_path,
+            "pid": process.pid,
+            "port": actual_port,
+            "url": url
         })
 
         return {
             "success": True,
             "pid": process.pid,
             "project_path": project_path,
-            "port": port,
-            "url": f"http://localhost:{port}",
-            "message": "React development server started successfully.",
+            "port": actual_port,
+            "url": url,
+            "message": "React development server is ready.",
             "log_file": log_path
         }
 
@@ -555,7 +678,18 @@ def stop_react_app(pid: int):
             output = result.stdout.strip()
 
         else:
-            os.killpg(pid, 15)
+            os.killpg(pid, signal.SIGTERM)
+
+            # Give the process group a moment to exit cleanly.
+            deadline = time.time() + 3
+
+            while time.time() < deadline:
+                try:
+                    os.killpg(pid, 0)
+                    time.sleep(0.1)
+                except ProcessLookupError:
+                    break
+
             success = True
             output = f"Process group {pid} terminated."
 
@@ -568,7 +702,11 @@ def stop_react_app(pid: int):
         return {
             "success": success,
             "pid": pid,
-            "message": "React development server terminated." if success else "Failed to terminate React development server.",
+            "message": (
+                "React development server terminated."
+                if success
+                else "Failed to terminate React development server."
+            ),
             "output": output
         }
 
@@ -578,6 +716,7 @@ def stop_react_app(pid: int):
             "pid": pid,
             "message": "React development server was already stopped."
         }
+
     except Exception as error:
         return {
             "success": False,
