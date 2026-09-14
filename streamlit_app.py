@@ -10,8 +10,6 @@ from app import (
     create_messages,
     run_agent_turn,
     set_event_callback,
-    start_react_app,
-    stop_react_app,
 )
 
 
@@ -137,16 +135,14 @@ def create_project_zip(project_path):
     return data.getvalue()
 
 
-def register_project(project_name, project_path, pid, port, url):
+def register_project(project_name, project_path, url):
     key = project_key(project_path, project_name)
 
     st.session_state.projects[key] = {
         "project_name": project_name or "React project",
         "project_path": project_path,
-        "pid": pid,
-        "port": port,
         "url": url,
-        "running": pid is not None,
+        "deployed": bool(url),
     }
 
 
@@ -155,25 +151,22 @@ def register_project_from_result(result):
     project_name = project.get("name", "React project")
 
     for event in result.get("events", []):
-        if event.get("step") == "observation":
-            if event.get("function") != "start_react_app":
-                continue
+        if event.get("step") != "observation":
+            continue
 
-            observation = event.get("observation") or {}
+        if event.get("function") != "deploy_to_cloudflare_pages":
+            continue
 
-            if observation.get("success"):
-                register_project(
-                    project_name=project_name,
-                    project_path=observation.get("project_path", ""),
-                    pid=observation.get("pid"),
-                    port=observation.get("port", 5173),
-                    url=observation.get(
-                        "url",
-                        "http://localhost:5173"
-                    ),
-                )
+        observation = event.get("observation") or {}
 
-            break
+        if observation.get("success"):
+            register_project(
+                project_name=project_name,
+                project_path=observation.get("project_path", ""),
+                url=observation.get("url", ""),
+            )
+
+        break
 
 
 def render_live_event(event, placeholder):
@@ -224,28 +217,6 @@ def render_live_event(event, placeholder):
                 "error",
                 "Tool execution failed."
             )
-
-    elif step == "server_port_changed":
-        title = "🔀 Port changed"
-        body = (
-            f"Port {event.get('requested_port')} is busy. "
-            f"Using port {event.get('port')}."
-        )
-
-    elif step == "server_starting":
-        title = "🚀 Starting React"
-        body = (
-            f"Starting on port {event.get('port')} "
-            f"(PID {event.get('pid')})"
-        )
-
-    elif step == "server_ready":
-        title = "🟢 React is ready"
-        body = event.get("url", "")
-
-    elif step == "server_stopped":
-        title = "⏹ React stopped"
-        body = f"PID {event.get('pid')}"
 
     else:
         title = step or "Agent"
@@ -314,30 +285,6 @@ def render_full_history():
                     f"{observation.get('error', 'failed')}"
                 )
 
-        elif step == "server_port_changed":
-            st.write(
-                f"**🔀 Port:** "
-                f"{event.get('requested_port')} → "
-                f"{event.get('port')}"
-            )
-
-        elif step == "server_starting":
-            st.write(
-                f"**🚀 Starting:** "
-                f"port {event.get('port')} · "
-                f"PID {event.get('pid')}"
-            )
-
-        elif step == "server_ready":
-            st.write(
-                f"**🟢 Ready:** {event.get('url', '')}"
-            )
-
-        elif step == "server_stopped":
-            st.write(
-                f"**⏹ Stopped:** PID {event.get('pid')}"
-            )
-
         else:
             st.write(
                 f"**{step}:** "
@@ -370,141 +317,57 @@ if projects:
     for key, project in list(projects.items()):
 
         name = project.get("project_name", "React project")
-        url = project.get(
-            "url",
-            "http://localhost:5173"
-        )
-        pid = project.get("pid")
-        port = project.get("port", 5173)
-        running = project.get("running", False)
+        url = project.get("url", "")
+        deployed = project.get("deployed", False)
 
         with st.container(border=True):
 
-            status_text = (
-                "🟢 Running"
-                if running
-                else "⚪ Stopped"
-            )
+            status_text = "🟢 Deployed" if deployed else "⚪ Not deployed"
 
             st.markdown(
                 f"### {name} &nbsp; "
-                f"<span class='{'status-running' if running else 'status-stopped'}'>"
+                f"<span class='{'status-running' if deployed else 'status-stopped'}'>"
                 f"{status_text}</span>",
                 unsafe_allow_html=True,
             )
 
-            st.caption(
-                f"Port: {port}"
-                + (f" · PID: {pid}" if pid else "")
-            )
+            if deployed and url:
+                safe_url = html.escape(url, quote=True)
 
-            col1, col2, col3, col4 = st.columns(
-                [2, 1, 1, 1]
-            )
+                st.markdown(
+                    f'<a class="open-app" '
+                    f'href="{safe_url}" '
+                    f'target="_blank">'
+                    f'🌐 Open App ↗'
+                    f'</a>',
+                    unsafe_allow_html=True,
+                )
 
-            with col1:
-                if running:
-                    safe_url = html.escape(
-                        url,
-                        quote=True
+                st.caption(f"`{url}`")
+            else:
+                st.write("Deployment unavailable.")
+
+            project_path = project.get("project_path", "")
+
+            if project_path and Path(project_path).is_dir():
+                try:
+                    zip_data = create_project_zip(project_path)
+                    download_name = (
+                        f"{safe_project_filename(name)}.zip"
                     )
 
-                    st.markdown(
-                        f'<a class="open-app" '
-                        f'href="{safe_url}" '
-                        f'target="_blank">'
-                        f'🌐 Open App ↗'
-                        f'</a>',
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.write("App is stopped.")
-
-            with col2:
-                if running:
-                    if st.button(
-                        "⏹ Stop",
-                        key=f"stop_{key}",
+                    st.download_button(
+                        f"⬇️ Download {download_name}",
+                        data=zip_data,
+                        file_name=download_name,
+                        mime="application/zip",
+                        key=f"download_{key}",
                         use_container_width=True,
-                    ):
-                        result = stop_react_app(pid)
-
-                        if result.get("success"):
-                            project["running"] = False
-                            project["pid"] = None
-                            st.success(
-                                f"{name} stopped."
-                            )
-                            st.rerun()
-                        else:
-                            st.error(
-                                result.get(
-                                    "error",
-                                    "Could not stop project."
-                                )
-                            )
-                else:
-                    if st.button(
-                        "▶ Start",
-                        key=f"start_{key}",
-                        use_container_width=True,
-                    ):
-                        with st.spinner(
-                            f"Starting {name}..."
-                        ):
-                            result = start_react_app(
-                                project["project_path"],
-                                project.get("port", 5173),
-                            )
-
-                        if result.get("success"):
-                            project.update(
-                                {
-                                    "running": True,
-                                    "pid": result["pid"],
-                                    "port": result["port"],
-                                    "url": result["url"],
-                                }
-                            )
-
-                            st.success(
-                                f"{name} is running."
-                            )
-                            st.rerun()
-                        else:
-                            st.error(
-                                result.get(
-                                    "error",
-                                    "Could not start project."
-                                )
-                            )
-
-            with col3:
-                if running:
-                    st.caption(
-                        f"`{url}`"
                     )
-
-            with col4:
-                project_path = project.get("project_path", "")
-                if project_path and Path(project_path).is_dir():
-                    try:
-                        zip_data = create_project_zip(project_path)
-                        download_name = (
-                            f"{safe_project_filename(name)}.zip"
-                        )
-                        st.download_button(
-                            f"⬇️ Download {download_name}",
-                            data=zip_data,
-                            file_name=download_name,
-                            mime="application/zip",
-                            key=f"download_{key}",
-                            use_container_width=True,
-                        )
-                    except Exception as exc:
-                        st.error(f"Could not create ZIP: {exc}")
-                else:
-                    st.caption("ZIP unavailable")
+                except Exception as exc:
+                    st.error(f"Could not create ZIP: {exc}")
+            else:
+                st.caption("ZIP unavailable")
 
     st.divider()
 

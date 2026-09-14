@@ -9,10 +9,11 @@ import sys
 import socket
 import time
 import signal
-import urllib.request
-
 import re
 from pathlib import Path
+
+import urllib.request
+import urllib.error
 
 
 # ============================================================
@@ -459,6 +460,275 @@ def install_package(project_path: str, package: str = None):
         }
 
 
+# deploy_to_cloudflare_pages
+def deploy_to_cloudflare_pages(project_path: str, project_name: str):
+    """
+    Build a React application and deploy its dist folder
+    to Cloudflare Pages using Direct Upload.
+    """
+
+    try:
+        account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID")
+        api_token = os.getenv("CLOUDFLARE_API_TOKEN")
+
+        if not account_id or not api_token:
+            return {
+                "success": False,
+                "error": (
+                    "Cloudflare credentials are not configured. "
+                    "Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN."
+                )
+            }
+
+        if not os.path.isdir(project_path):
+            return {
+                "success": False,
+                "error": f"Project directory not found: {project_path}"
+            }
+
+        # --------------------------------------------------------
+        # STEP 1: Build React application
+        # --------------------------------------------------------
+
+        emit_event({
+            "step": "deployment_build_starting",
+            "project_path": project_path,
+            "project_name": project_name
+        })
+
+        build_command = ["npm", "run", "build"]
+
+        if os.name == "nt":
+            build_command[0] = "npm.cmd"
+
+        build_process = subprocess.Popen(
+            build_command,
+            cwd=project_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            shell=False
+        )
+
+        build_output = []
+
+        if build_process.stdout is not None:
+            for line in build_process.stdout:
+                line = line.rstrip("\r\n")
+                build_output.append(line)
+
+                emit_event({
+                    "step": "command_output",
+                    "line": line
+                })
+
+        build_exit_code = build_process.wait()
+
+        if build_exit_code != 0:
+            return {
+                "success": False,
+                "error": "React production build failed.",
+                "exit_code": build_exit_code,
+                "output": "\n".join(build_output)
+            }
+
+        dist_path = os.path.join(project_path, "dist")
+
+        if not os.path.isdir(dist_path):
+            return {
+                "success": False,
+                "error": f"Build completed but dist directory was not found: {dist_path}"
+            }
+
+        # --------------------------------------------------------
+        # STEP 2: Check/create Cloudflare Pages project
+        # --------------------------------------------------------
+
+        api_base = (
+            f"https://api.cloudflare.com/client/v4"
+            f"/accounts/{account_id}/pages/projects/{project_name}"
+        )
+
+        headers = {
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json"
+        }
+
+        project_exists = False
+
+        try:
+            request = urllib.request.Request(
+                api_base,
+                headers=headers,
+                method="GET"
+            )
+
+            with urllib.request.urlopen(request, timeout=30) as response:
+                if response.status == 200:
+                    project_exists = True
+
+        except urllib.error.HTTPError as error:
+            if error.code != 404:
+                error_body = error.read().decode("utf-8", errors="replace")
+
+                return {
+                    "success": False,
+                    "error": (
+                        f"Cloudflare project lookup failed: "
+                        f"HTTP {error.code} - {error_body}"
+                    )
+                }
+
+        # --------------------------------------------------------
+        # STEP 3: Create Pages project if necessary
+        # --------------------------------------------------------
+
+        if not project_exists:
+            create_url = (
+                f"https://api.cloudflare.com/client/v4"
+                f"/accounts/{account_id}/pages/projects"
+            )
+
+            payload = json.dumps({
+                "name": project_name,
+                "production_branch": "main"
+            }).encode("utf-8")
+
+            request = urllib.request.Request(
+                create_url,
+                data=payload,
+                headers=headers,
+                method="POST"
+            )
+
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    response_body = json.loads(
+                        response.read().decode("utf-8")
+                    )
+
+                    if not response_body.get("success"):
+                        return {
+                            "success": False,
+                            "error": (
+                                "Cloudflare Pages project creation failed.",
+                                response_body
+                            )
+                        }
+
+            except urllib.error.HTTPError as error:
+                error_body = error.read().decode(
+                    "utf-8",
+                    errors="replace"
+                )
+
+                return {
+                    "success": False,
+                    "error": (
+                        f"Cloudflare Pages project creation failed: "
+                        f"HTTP {error.code} - {error_body}"
+                    )
+                }
+
+        # --------------------------------------------------------
+        # STEP 4: Deploy dist using Wrangler
+        # --------------------------------------------------------
+
+        emit_event({
+            "step": "deployment_starting",
+            "project_name": project_name
+        })
+
+        deploy_command = [
+            "npx",
+            "wrangler@latest",
+            "pages",
+            "deploy",
+            dist_path,
+            "--project-name",
+            project_name
+        ]
+
+        if os.name == "nt":
+            deploy_command[0] = "npx.cmd"
+
+        deploy_env = os.environ.copy()
+        deploy_env["CLOUDFLARE_ACCOUNT_ID"] = account_id
+        deploy_env["CLOUDFLARE_API_TOKEN"] = api_token
+
+        emit_event({
+            "step": "command_start",
+            "command": deploy_command,
+            "cwd": project_path
+        })
+
+        process = subprocess.Popen(
+            deploy_command,
+            cwd=project_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            shell=False,
+            env=deploy_env
+        )
+
+        output_lines = []
+
+        if process.stdout is not None:
+            for line in process.stdout:
+                line = line.rstrip("\r\n")
+                output_lines.append(line)
+
+                emit_event({
+                    "step": "command_output",
+                    "line": line
+                })
+
+        exit_code = process.wait()
+
+        if exit_code != 0:
+            return {
+                "success": False,
+                "error": "Cloudflare Pages deployment failed.",
+                "exit_code": exit_code,
+                "output": "\n".join(output_lines)
+            }
+
+        # --------------------------------------------------------
+        # STEP 5: Return public URL
+        # --------------------------------------------------------
+
+        public_url = f"https://{project_name}.pages.dev"
+
+        emit_event({
+            "step": "deployment_ready",
+            "project_name": project_name,
+            "url": public_url
+        })
+
+        return {
+            "success": True,
+            "project_name": project_name,
+            "project_path": project_path,
+            "dist_path": dist_path,
+            "url": public_url,
+            "message": "React application deployed successfully to Cloudflare Pages."
+        }
+
+    except Exception as error:
+        return {
+            "success": False,
+            "error": str(error)
+        }
+
 # ============================================================
 # REACT SERVER TOOLS
 # ============================================================
@@ -737,8 +1007,7 @@ available_tools = {
     "list_directory": list_directory,
     "install_dependencies": install_dependencies,
     "install_package": install_package,
-    "start_react_app": start_react_app,
-    "stop_react_app": stop_react_app
+    "deploy_to_cloudflare_pages": deploy_to_cloudflare_pages
 }
 
 
@@ -772,14 +1041,18 @@ STEP 4: write_file
   - Write all application source files
   - Use 'file_path' and 'content' parameters
 
-STEP 5: start_react_app
-  - Start the React development server after ALL application files are written
-  - Use the project_path from the project
-  - Use port 5173 unless another port is required
-  - The server must listen on 0.0.0.0
+STEP 5: deploy_to_cloudflare_pages
+   - After ALL application files are written
+   - Deploy the application to Cloudflare Pages
+   - Use the project_path from the project
+   - Use the project name as the Cloudflare Pages project name
+   - The tool will build the React application
+   - The tool will deploy the dist directory
+   - The tool will return the public https://<project-name>.pages.dev URL
 
 STEP 6: Output success
-  - Return the running application URL
+   - Return the public Cloudflare Pages URL
+   - Do NOT return localhost:5173
 
 ==================================================
 EXAMPLE WORKFLOW - WEATHER APP
@@ -839,9 +1112,9 @@ Action 4:
 Action 5:
 {
     "step": "action",
-    "content": "Starting React development server",
-    "function": "start_react_app",
-    "input": {"project_path": "/path/to/weather-app", "port": 5173}
+    "content": "Deploying React application to Cloudflare Pages",
+    "function": "deploy_to_cloudflare_pages",
+    "input": {"project_path": "/path/to/weather-app", "project_name": "weather-app"}
 }
 
 ==================================================
@@ -935,9 +1208,9 @@ IMPORTANT RULES
 
 1. ALWAYS call run_command after create_react_project
 2. ALWAYS call install_dependencies after run_command succeeds
-3. ALWAYS call start_react_app after all application files have been written
-4. The final output must include the running application URL
-5. Use EXACT parameter names (file_path, project_path, etc.)
+3. ALWAYS call deploy_to_cloudflare_pages after all application files have been written
+4. The final output must include the public Cloudflare Pages URL
+5. NEVER return localhost:5173 as the application URL
 6. Write COMPLETE, WORKING code in each file
 7. NEVER create placeholder code or TODO comments
 8. Use React hooks properly (useState, useEffect, etc.)
@@ -945,7 +1218,9 @@ IMPORTANT RULES
 10. Make responsive designs with CSS
 11. Ask for missing information (theme, bundler) before creating
 12. Return ONLY valid JSON - no markdown, no backticks, no extra text
-13. *** RETURN EXACTLY ONE JSON OBJECT PER RESPONSE ***
+13. Production deployment is through deploy_to_cloudflare_pages only.
+14. Do NOT call start_react_app or stop_react_app. They are local-development helpers and are not available to the agent.
+15. *** RETURN EXACTLY ONE JSON OBJECT PER RESPONSE ***
     - Do NOT return a "plan" and an "action" together.
     - Do NOT chain multiple steps in one reply.
     - Pick ONE step (question OR plan OR action OR output) and return only that.
