@@ -15,6 +15,8 @@ from pathlib import Path
 import urllib.request
 import urllib.error
 
+import random
+
 
 # ============================================================
 # ENVIRONMENT
@@ -1232,48 +1234,104 @@ IMPORTANT RULES
 # GEMINI API HELPER
 # ============================================================
 
+PRIMARY_MODEL = "gemini-3.1-flash-lite"
+FALLBACK_MODEL = "gemini-3.5-flash-lite"
+
+
 def call_gemini(messages, system_prompt):
     """
-    Call Gemini 3.1 Flash Lite API with the given messages.
-    
-    Parameters:
-    - messages: List of message objects with 'role' and 'content'
-    - system_prompt: The system prompt to use
-    
-    Returns:
-    - The response text from Gemini
-    """
-    try:
-        # Build the full conversation
-        full_prompt = f"{system_prompt}\n\n"
-        
-        for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
-            
-            if role == "system":
-                # Skip system role as we already added it
-                continue
-            elif role == "user":
-                full_prompt += f"User: {content}\n\n"
-            elif role == "assistant":
-                full_prompt += f"Assistant: {content}\n\n"
-        
-        # Add final instruction for JSON response
-        full_prompt += "Assistant: "
-        
-        # Call Gemini with the full prompt
-        response = client.models.generate_content(
-            model="gemini-3.1-flash-lite",
-            contents=full_prompt
-        )
-        
-        return response.text
-    
-    except Exception as error:
-        print(f"\n❌ Gemini API Error:\n{error}")
-        return None
+    Call Gemini with retry + fallback handling.
 
+    Retries temporary server/rate-limit errors and falls back
+    to another supported model if necessary.
+    """
+
+    # Build conversation
+    full_prompt = f"{system_prompt}\n\n"
+
+    for msg in messages:
+        role = msg["role"]
+        content = msg["content"]
+
+        if role == "system":
+            continue
+        elif role == "user":
+            full_prompt += f"User: {content}\n\n"
+        elif role == "assistant":
+            full_prompt += f"Assistant: {content}\n\n"
+
+    full_prompt += "Assistant: "
+
+    models_to_try = [
+        PRIMARY_MODEL,
+        FALLBACK_MODEL,
+    ]
+
+    retryable_errors = (
+        "503",
+        "429",
+        "500",
+        "502",
+        "504",
+        "UNAVAILABLE",
+        "RESOURCE_EXHAUSTED",
+    )
+
+    for model in models_to_try:
+
+        for attempt in range(4):
+
+            try:
+                print(
+                    f"\n🤖 Gemini request "
+                    f"(model={model}, attempt={attempt + 1}/4)"
+                )
+
+                response = client.models.generate_content(
+                    model=model,
+                    contents=full_prompt
+                )
+
+                if response.text:
+                    return response.text
+
+                raise RuntimeError("Gemini returned an empty response.")
+
+            except Exception as error:
+
+                error_text = str(error)
+
+                print(
+                    f"\n❌ Gemini error "
+                    f"(model={model}, attempt={attempt + 1}/4):"
+                )
+                print(error_text)
+
+                # Only retry temporary errors
+                if not any(
+                    error_code in error_text
+                    for error_code in retryable_errors
+                ):
+                    return None
+
+                # Last attempt for this model
+                if attempt == 3:
+                    print(
+                        f"\n⚠️ {model} failed after 4 attempts."
+                    )
+                    break
+
+                # Exponential backoff + jitter
+                delay = (2 ** attempt) + random.uniform(0, 0.5)
+
+                print(
+                    f"⏳ Retrying in {delay:.1f}s..."
+                )
+
+                time.sleep(delay)
+
+    print("\n❌ All Gemini models failed.")
+    return None
 
 def clean_json_response(raw_response):
     """
@@ -1412,7 +1470,10 @@ def run_agent_turn(user_input, messages):
             if raw_response is None:
                 return {
                     "status": "error",
-                    "content": "Failed to get a response from Gemini.",
+                    "content": (
+                        "Gemini is temporarily unavailable. "
+                        "The agent retried the request but could not continue."
+                    ),
                     "project": {},
                     "files": [],
                     "events": events
