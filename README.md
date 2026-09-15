@@ -1,3 +1,17 @@
+Live URl and Deployments Links :
+
+https://dashboard.render.com/web/srv-dajcgpek1f9s73d3q990/logs?t=app&r=live
+https://dash.cloudflare.com/bf44a31d19718169c9400f0b4d0b5eb9/api-tokens
+https://react-ai-agent-jqt5.onrender.com/
+
+react agents link :
+https://expense-tracker-app.pages.dev/
+https://quiz-app.pages.dev/
+https://scientific-calculator.pages.dev/
+https://todo-fresh.pages.dev/
+
+==================================================================================
+
 React AI Agent
 
 =====================  Development Environment  =========================
