@@ -15,17 +15,14 @@ RUN apt-get update \
 
 WORKDIR /workspace
 
-# Install Python dependencies
 COPY requirements.txt .
-
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
 COPY app.py .
 COPY streamlit_app.py .
+COPY agent ./agent
+COPY tools ./tools
 
-# Render will use this port
 EXPOSE 10000
 
-# Production/default startup
 CMD ["streamlit", "run", "streamlit_app.py", "--server.address=0.0.0.0", "--server.port=10000"]
