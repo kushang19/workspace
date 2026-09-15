@@ -2,6 +2,7 @@
 
 from dotenv import load_dotenv
 from google import genai  # pip install google-genai
+from google.genai import types
 import json
 import subprocess
 import os
@@ -15,8 +16,6 @@ from pathlib import Path
 import urllib.request
 import urllib.error
 
-import random
-
 
 # ============================================================
 # ENVIRONMENT
@@ -25,7 +24,14 @@ import random
 load_dotenv()
 
 # Initialize Gemini client
-client = genai.Client()
+client = genai.Client(
+    http_options=types.HttpOptions(
+        timeout=15000,
+        retry_options=types.HttpRetryOptions(
+            attempts=1
+        ),
+    )
+)
 
 
 # ============================================================
@@ -1234,20 +1240,17 @@ IMPORTANT RULES
 # GEMINI API HELPER
 # ============================================================
 
-PRIMARY_MODEL = "gemini-3.1-flash-lite"
-FALLBACK_MODEL = "gemini-3.5-flash-lite"
-
-
 def call_gemini(messages, system_prompt):
     """
-    Call Gemini with retry + fallback handling.
+    Call Gemini with a short, controlled retry policy.
 
-    Retries temporary server/rate-limit errors and falls back
-    to another supported model if necessary.
+    The SDK normally retries transient 5xx/429 errors automatically.
+    For this interactive agent we disable those hidden retries and
+    handle a small number of retries ourselves so the UI does not
+    appear stuck for a long time.
     """
 
-    # Build conversation
-    full_prompt = f"{system_prompt}\n\n"
+    full_prompt = f"{system_prompt}\\n\\n"
 
     for msg in messages:
         role = msg["role"]
@@ -1256,82 +1259,80 @@ def call_gemini(messages, system_prompt):
         if role == "system":
             continue
         elif role == "user":
-            full_prompt += f"User: {content}\n\n"
+            full_prompt += f"User: {content}\\n\\n"
         elif role == "assistant":
-            full_prompt += f"Assistant: {content}\n\n"
+            full_prompt += f"Assistant: {content}\\n\\n"
 
     full_prompt += "Assistant: "
 
-    models_to_try = [
-        PRIMARY_MODEL,
-        FALLBACK_MODEL,
-    ]
+    max_attempts = 2
+    retry_delays = [1.0]
 
-    retryable_errors = (
-        "503",
-        "429",
-        "500",
-        "502",
-        "504",
-        "UNAVAILABLE",
-        "RESOURCE_EXHAUSTED",
-    )
+    for attempt in range(max_attempts):
+        try:
+            emit_event({
+                "step": "gemini",
+                "content": (
+                    "Contacting Gemini..."
+                    if attempt == 0
+                    else "Gemini is temporarily busy. Retrying..."
+                ),
+                "function": None,
+                "input": {},
+            })
 
-    for model in models_to_try:
+            print(
+                f"\\n🤖 Gemini request "
+                f"(attempt {attempt + 1}/{max_attempts})"
+            )
 
-        for attempt in range(4):
+            response = client.models.generate_content(
+                model="gemini-3.1-flash-lite",
+                contents=full_prompt
+            )
 
-            try:
-                print(
-                    f"\n🤖 Gemini request "
-                    f"(model={model}, attempt={attempt + 1}/4)"
+            if response.text:
+                return response.text
+
+            raise RuntimeError("Gemini returned an empty response.")
+
+        except Exception as error:
+            error_text = str(error)
+
+            print(
+                f"\\n❌ Gemini API Error "
+                f"(attempt {attempt + 1}/{max_attempts}):\\n{error_text}"
+            )
+
+            is_transient = any(
+                code in error_text
+                for code in (
+                    "503",
+                    "429",
+                    "500",
+                    "502",
+                    "504",
+                    "UNAVAILABLE",
+                    "RESOURCE_EXHAUSTED",
                 )
+            )
 
-                response = client.models.generate_content(
-                    model=model,
-                    contents=full_prompt
-                )
+            if not is_transient or attempt == max_attempts - 1:
+                return None
 
-                if response.text:
-                    return response.text
+            delay = retry_delays[attempt]
 
-                raise RuntimeError("Gemini returned an empty response.")
+            emit_event({
+                "step": "gemini_retry",
+                "content": f"Gemini is busy. Retrying in {delay:.0f}s...",
+                "function": None,
+                "input": {},
+            })
 
-            except Exception as error:
+            time.sleep(delay)
 
-                error_text = str(error)
-
-                print(
-                    f"\n❌ Gemini error "
-                    f"(model={model}, attempt={attempt + 1}/4):"
-                )
-                print(error_text)
-
-                # Only retry temporary errors
-                if not any(
-                    error_code in error_text
-                    for error_code in retryable_errors
-                ):
-                    return None
-
-                # Last attempt for this model
-                if attempt == 3:
-                    print(
-                        f"\n⚠️ {model} failed after 4 attempts."
-                    )
-                    break
-
-                # Exponential backoff + jitter
-                delay = (2 ** attempt) + random.uniform(0, 0.5)
-
-                print(
-                    f"⏳ Retrying in {delay:.1f}s..."
-                )
-
-                time.sleep(delay)
-
-    print("\n❌ All Gemini models failed.")
     return None
+
 
 def clean_json_response(raw_response):
     """
@@ -1470,10 +1471,7 @@ def run_agent_turn(user_input, messages):
             if raw_response is None:
                 return {
                     "status": "error",
-                    "content": (
-                        "Gemini is temporarily unavailable. "
-                        "The agent retried the request but could not continue."
-                    ),
+                    "content": "Gemini is temporarily unavailable. The request was retried, but Gemini did not accept it. Please try again in a few seconds.",
                     "project": {},
                     "files": [],
                     "events": events

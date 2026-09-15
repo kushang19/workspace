@@ -444,10 +444,8 @@ if prompt:
 
     with st.chat_message("assistant"):
 
-        status = st.status(
-            "🤖 Agent is working...",
-            expanded=True,
-        )
+        status_placeholder = st.empty()
+        status_placeholder.info("🤖 Agent is working...")
 
         # Clear the current live event before this run.
         live_placeholder.empty()
@@ -468,11 +466,7 @@ if prompt:
 
             if result["status"] == "question":
 
-                status.update(
-                    label="❓ Waiting for your input",
-                    state="complete",
-                    expanded=False,
-                )
+                status_placeholder.empty()
 
                 response_text = result["content"]
 
@@ -487,11 +481,7 @@ if prompt:
 
             elif result["status"] == "output":
 
-                status.update(
-                    label="✅ Agent finished",
-                    state="complete",
-                    expanded=False,
-                )
+                status_placeholder.empty()
 
                 response_text = result["content"]
 
@@ -533,11 +523,7 @@ if prompt:
 
             else:
 
-                status.update(
-                    label="❌ Agent failed",
-                    state="error",
-                    expanded=True,
-                )
+                status_placeholder.empty()
 
                 response_text = result["content"]
 
